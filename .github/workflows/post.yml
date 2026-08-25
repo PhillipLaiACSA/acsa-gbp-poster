@@ -8,7 +8,7 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: gbp-post
@@ -29,5 +29,5 @@ jobs:
           GOOGLE_CLIENT_ID:       ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET:   ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN:   ${{ secrets.GOOGLE_REFRESH_TOKEN }}
-          WP_USER:                ${{ secrets.WP_USER }}
+          GITHUB_TOKEN:                ${{ secrets.GITHUB_TOKEN }}
           WP_APP_PASSWORD:        ${{ secrets.WP_APP_PASSWORD }}
