@@ -1,0 +1,33 @@
+name: Post to Google Business Profile
+
+# Sun & Wed 22:30 UTC == Mon & Thu ~08:30 (AEST) / 09:30 (AEDT) Melbourne.
+# The script decides which schedule row is due using Melbourne local date.
+on:
+  schedule:
+    - cron: '30 22 * * 0,3'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gbp-post
+  cancel-in-progress: false
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Post one due update
+        run: python gbp_post.py
+        env:
+          GOOGLE_CLIENT_ID:       ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET:   ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN:   ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          WP_USER:                ${{ secrets.WP_USER }}
+          WP_APP_PASSWORD:        ${{ secrets.WP_APP_PASSWORD }}

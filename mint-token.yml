@@ -1,0 +1,33 @@
+name: (one-time) Mint Google refresh token
+
+# Run manually AFTER you have an authorization code from the consent screen.
+on:
+  workflow_dispatch:
+    inputs:
+      auth_code:
+        description: 'The code=... value copied from the consent redirect URL'
+        required: true
+      redirect_uri:
+        description: 'Redirect URI used to get the code (leave as default)'
+        required: true
+        default: 'http://localhost'
+
+permissions:
+  contents: read
+
+jobs:
+  mint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests
+      - name: Exchange code for a permanent refresh token
+        run: python mint_from_code.py
+        env:
+          GOOGLE_CLIENT_ID:     ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          AUTH_CODE:            ${{ github.event.inputs.auth_code }}
+          REDIRECT_URI:         ${{ github.event.inputs.redirect_uri }}
