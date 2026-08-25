@@ -20,6 +20,8 @@ import io
 import os
 import sys
 import json
+import time
+import base64
 import datetime
 
 import requests
@@ -235,34 +237,31 @@ def to_clean_jpeg(raw, max_w=1600, quality=75):
     return out.read()
 
 
-# ---------- WordPress media ----------
-def upload_to_wp(jpeg, filename, alt_text):
-    base = CFG["wp_url"].rstrip("/")
-    auth = (env("WP_USER"), env("WP_APP_PASSWORD"))
-    r = requests.post(
-        f"{base}/wp-json/wp/v2/media",
-        auth=auth,
-        headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
-            "Content-Type": "image/jpeg",
-        },
-        data=jpeg, timeout=90,
+# ---------- image hosting: commit to this repo, serve via public raw URL ----------
+# The repo is public, so raw.githubusercontent.com serves the committed JPEG at a
+# public https URL that Google can fetch. No WordPress, no extra credentials — the
+# workflow's built-in GITHUB_TOKEN (contents: write) does the commit.
+def upload_to_github(jpeg, filename):
+    token = env("GITHUB_TOKEN")
+    repo = env("GITHUB_REPOSITORY")           # e.g. "PhillipLaiACSA/acsa-gbp-poster"
+    branch = os.environ.get("GITHUB_REF_NAME", "main")
+    path = f"images/{filename}"
+    body = {
+        "message": f"gbp image: {filename}",
+        "content": base64.b64encode(jpeg).decode(),
+        "branch": branch,
+    }
+    r = requests.put(
+        f"https://api.github.com/repos/{repo}/contents/{path}",
+        headers={"Authorization": f"Bearer {token}",
+                 "Accept": "application/vnd.github+json"},
+        json=body, timeout=90,
     )
     if r.status_code not in (200, 201):
-        die(f"WordPress upload failed ({r.status_code}): {r.text[:300]}")
-    j = r.json()
-    media_id, url = j.get("id"), j.get("source_url")
-    # set alt + title for SEO (best-effort)
-    try:
-        requests.post(f"{base}/wp-json/wp/v2/media/{media_id}", auth=auth,
-                      json={"alt_text": alt_text, "title": alt_text}, timeout=60)
-    except Exception:
-        pass
-    if not url or not url.lower().startswith("https://"):
-        die(f"WordPress returned no public https URL (got: {url})")
-    if url.lower().endswith(".webp"):
-        die("WordPress returned a .webp URL; Google rejects webp")
-    return url
+        die(f"GitHub image upload failed ({r.status_code}): {r.text[:300]}")
+    raw_url = f"https://raw.githubusercontent.com/{repo}/{branch}/{path}"
+    time.sleep(3)  # let the CDN pick up the new file before Google fetches it
+    return raw_url
 
 
 # ---------- Google Business Profile ----------
@@ -329,17 +328,17 @@ def main():
 
     raw = download_bytes(drive, photo["id"])
     jpeg = to_clean_jpeg(raw)
-    alt = f"Muay Thai {resolved_theme} class at ACSA Thornbury Melbourne"
-    fname = f"acsa-{resolved_theme}-{date_s}.jpg"
-    wp_url = upload_to_wp(jpeg, fname, alt)
-    log(f"hosted: {wp_url}")
+    # unique filename (theme + date + short photo id) so re-runs never collide
+    fname = f"acsa-{resolved_theme}-{date_s}-{photo['id'][:8]}.jpg"
+    img_url = upload_to_github(jpeg, fname)
+    log(f"hosted: {img_url}")
 
-    result = post_to_gbp(session, copy, action_type, link, wp_url)
+    result = post_to_gbp(session, copy, action_type, link, img_url)
     log(f"POSTED ok: {result.get('name','(no name)')}")
 
     # write back + log photo
     mark_posted(sheets, sheet_id, row_num)
-    log_photo(sheets, sheet_id, resolved_theme, photo["name"], photo["id"], wp_url)
+    log_photo(sheets, sheet_id, resolved_theme, photo["name"], photo["id"], img_url)
     log(f"sheet updated (row {row_num} -> Posted) and photo logged")
 
     if remaining - 1 <= CFG["low_pool_threshold"]:
