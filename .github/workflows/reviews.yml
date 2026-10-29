@@ -1,0 +1,59 @@
+name: Read Google review count (read-only)
+
+# WEB15 option B. READ-ONLY: reads ACSA's Google Business Profile review
+# count + average rating. No posting, no GBP writes, no website writes.
+# Public logs: prints ONLY the date, totalReviewCount and averageRating
+# (or the Google error status/message). Never tokens, names or review text.
+# Weekly: Sun 21:17 UTC == Mon ~07:17/08:17 Melbourne.
+on:
+  schedule:
+    - cron: '17 21 * * 0'
+  workflow_dispatch: {}
+  push:
+    branches: [web15-review-count-readonly]
+    paths: ['.github/workflows/reviews.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gbp-reviews-read
+  cancel-in-progress: false
+
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Read review count
+        env:
+          GOOGLE_CLIENT_ID:     ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          ACCOUNT_ID:  '104143825070635961024'
+          LOCATION_ID: '16332564658095558449'
+        run: |
+          set -euo pipefail
+          tok_json=$(curl -sS -X POST https://oauth2.googleapis.com/token \
+            --data-urlencode "client_id=${GOOGLE_CLIENT_ID}" \
+            --data-urlencode "client_secret=${GOOGLE_CLIENT_SECRET}" \
+            --data-urlencode "refresh_token=${GOOGLE_REFRESH_TOKEN}" \
+            --data-urlencode "grant_type=refresh_token")
+          access=$(printf '%s' "$tok_json" | jq -r '.access_token // empty')
+          if [ -z "$access" ]; then
+            echo "Token mint FAILED: $(printf '%s' "$tok_json" | jq -r '.error // "unknown"')"
+            exit 1
+          fi
+          echo "::add-mask::${access}"
+          unset tok_json
+          code=$(curl -sS -o resp.json -w '%{http_code}' \
+            -H "Authorization: Bearer ${access}" \
+            "https://mybusiness.googleapis.com/v4/accounts/${ACCOUNT_ID}/locations/${LOCATION_ID}/reviews?pageSize=1")
+          echo "date: $(TZ=Australia/Melbourne date +%F)"
+          if [ "$code" != "200" ]; then
+            echo "Reviews API FAILED: HTTP ${code} $(jq -r '[.error.status, .error.message] | map(select(.!=null)) | join(" - ")' resp.json 2>/dev/null || true)"
+            rm -f resp.json
+            exit 1
+          fi
+          echo "totalReviewCount: $(jq -r '.totalReviewCount // "MISSING"' resp.json)"
+          echo "averageRating: $(jq -r '.averageRating // "MISSING"' resp.json)"
+          rm -f resp.json
