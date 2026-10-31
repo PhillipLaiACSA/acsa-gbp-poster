@@ -1,7 +1,13 @@
 name: Read Google review count (read-only)
 
-# WEB15 option B. READ-ONLY: reads ACSA's Google Business Profile review
-# count + average rating. No posting, no GBP writes, no website writes.
+# WEB15 option B. READS ACSA's Google Business Profile review count + average
+# rating. No posting, no GBP writes, no website writes.
+# Part 2 (Phill "go" 31 Oct 2026): on main it also keeps a tiny PUBLIC file
+# reviews.json = {"count", "rating", "as_of"} ONLY, committed with this repo's
+# own GITHUB_TOKEN via the contents API, and ONLY when count/rating changed
+# (or the file is 28+ days old, so its as_of stays fresh). acsa-stats
+# reviews_sync.yml reads that file and opens a facts.json PR. Any other branch
+# = read + DRY RUN (prints what it would write, writes nothing).
 # Public logs: prints ONLY the date, totalReviewCount and averageRating
 # (or the Google error status/message). Never tokens, names or review text.
 # Weekly: Sun 21:17 UTC == Mon ~07:17/08:17 Melbourne.
@@ -14,7 +20,7 @@ on:
     paths: ['.github/workflows/reviews.yml']
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: gbp-reviews-read
@@ -25,6 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Read review count
+        id: read
         env:
           GOOGLE_CLIENT_ID:     ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
@@ -48,12 +55,76 @@ jobs:
           code=$(curl -sS -o resp.json -w '%{http_code}' \
             -H "Authorization: Bearer ${access}" \
             "https://mybusiness.googleapis.com/v4/accounts/${ACCOUNT_ID}/locations/${LOCATION_ID}/reviews?pageSize=1")
-          echo "date: $(TZ=Australia/Melbourne date +%F)"
+          today=$(TZ=Australia/Melbourne date +%F)
+          echo "date: ${today}"
           if [ "$code" != "200" ]; then
             echo "Reviews API FAILED: HTTP ${code} $(jq -r '[.error.status, .error.message] | map(select(.!=null)) | join(" - ")' resp.json 2>/dev/null || true)"
             rm -f resp.json
             exit 1
           fi
-          echo "totalReviewCount: $(jq -r '.totalReviewCount // "MISSING"' resp.json)"
-          echo "averageRating: $(jq -r '.averageRating // "MISSING"' resp.json)"
+          count=$(jq -r '.totalReviewCount // "MISSING"' resp.json)
+          rating=$(jq -r '.averageRating // "MISSING"' resp.json)
           rm -f resp.json
+          echo "totalReviewCount: ${count}"
+          echo "averageRating: ${rating}"
+          {
+            echo "count=${count}"
+            echo "rating=${rating}"
+            echo "today=${today}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Update public reviews.json (main only, only when changed)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO:     ${{ github.repository }}
+          IS_MAIN:  ${{ github.ref == 'refs/heads/main' }}
+          COUNT:    ${{ steps.read.outputs.count }}
+          RATING:   ${{ steps.read.outputs.rating }}
+          TODAY:    ${{ steps.read.outputs.today }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$COUNT" =~ ^[0-9]+$ ]] || [ "$COUNT" -lt 1 ] || [ "$COUNT" -gt 5000 ]; then
+            echo "Refusing to write: count '${COUNT}' is not a sane number"; exit 1
+          fi
+          if ! [[ "$RATING" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "Refusing to write: rating '${RATING}' is not a number"; exit 1
+          fi
+          new=$(jq -n --argjson c "$COUNT" --arg r "$RATING" --arg d "$TODAY" '{count: $c, rating: $r, as_of: $d}')
+          api="https://api.github.com/repos/${REPO}/contents/reviews.json"
+          hdr=(-H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28")
+          code=$(curl -sS -o cur.json -w '%{http_code}' "${hdr[@]}" "${api}?ref=main")
+          sha=""
+          if [ "$code" = "200" ]; then
+            sha=$(jq -r '.sha' cur.json)
+            old=$(jq -r '.content' cur.json | base64 -d)
+            o_count=$(printf '%s' "$old" | jq -r '.count // empty')
+            o_rating=$(printf '%s' "$old" | jq -r '.rating // empty')
+            o_asof=$(printf '%s' "$old" | jq -r '.as_of // empty')
+            age=9999
+            if [ -n "$o_asof" ]; then
+              age=$(( ( $(date -u -d "$TODAY" +%s) - $(date -u -d "$o_asof" +%s) ) / 86400 ))
+            fi
+            echo "reviews.json now: count ${o_count} rating ${o_rating} as_of ${o_asof} (${age} days old)"
+            if [ "$o_count" = "$COUNT" ] && [ "$o_rating" = "$RATING" ] && [ "$age" -lt 28 ]; then
+              echo "Unchanged - nothing written."
+              rm -f cur.json; exit 0
+            fi
+          elif [ "$code" = "404" ]; then
+            echo "reviews.json does not exist yet - will create it."
+          else
+            echo "Could not read reviews.json: HTTP ${code}"; rm -f cur.json; exit 1
+          fi
+          rm -f cur.json
+          if [ "$IS_MAIN" != "true" ]; then
+            echo "DRY RUN (not main): would write reviews.json = $(printf '%s' "$new" | jq -c .)"
+            exit 0
+          fi
+          payload=$(jq -n --arg m "reviews.json: count ${COUNT}, rating ${RATING} (${TODAY})" \
+            --arg c "$(printf '%s\n' "$new" | base64 -w0)" --arg s "$sha" \
+            '{message: $m, content: $c, branch: "main"} + (if $s == "" then {} else {sha: $s} end)')
+          code=$(curl -sS -o put.json -w '%{http_code}' -X PUT "${hdr[@]}" "$api" -d "$payload")
+          if [ "$code" != "200" ] && [ "$code" != "201" ]; then
+            echo "Write FAILED: HTTP ${code} $(jq -r '.message // empty' put.json 2>/dev/null || true)"; rm -f put.json; exit 1
+          fi
+          rm -f put.json
+          echo "Wrote reviews.json = $(printf '%s' "$new" | jq -c .)"
