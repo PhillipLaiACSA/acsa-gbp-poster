@@ -63,7 +63,8 @@ jobs:
             exit 1
           fi
           count=$(jq -r '.totalReviewCount // "MISSING"' resp.json)
-          rating=$(jq -r '.averageRating // "MISSING"' resp.json)
+          # averageRating comes back as a float (4.9000000953674316) -> 1 decimal ("4.9")
+          rating=$(jq -r '.averageRating // "MISSING" | if type == "number" then (. * 10 | round / 10 | tostring) else . end' resp.json)
           rm -f resp.json
           echo "totalReviewCount: ${count}"
           echo "averageRating: ${rating}"
